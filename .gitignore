@@ -1,3 +1,4 @@
 *.npy
 *.pt
 *.mypy_cache
+__pycache__

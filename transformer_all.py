@@ -13,6 +13,22 @@ import time
 from functools import partial
 from dataclasses import dataclass, field
 
+from pprint import pprint, pformat
+import inspect
+from pygments import highlight
+from pygments.lexers import Python3Lexer
+from pygments.formatters import TerminalTrueColorFormatter
+
+class Format:
+    def __init__(self, style):
+        self.style = style
+    def print_py(self, code):
+        print(highlight(code, Python3Lexer(), formatter=TerminalTrueColorFormatter(style=self.style)))
+    def print_obj(self, item):
+        self.print_py(pformat(item))
+    def print_src(self, item):
+        self.print_py(inspect.getsource(item))
+
 @dataclass
 class Config:
     seed: int = 0 # use fixed seed for testing
@@ -26,15 +42,75 @@ class Config:
     lr: float = 0.001
     num_epochs: int = 20
     heads: int = 4
+    emb: int = 32
+    device: str = "cuda"
 
-class TrainHandler:
-    @staticmethod
-    def config(config: Config):
-        np.random.seed(config.seed)
-        torch.manual_seed(config.seed)
-        torch.cuda.manual_seed(config.seed)
-        torch.cuda.empty_cache()
-        torch.backends.cudnn.deterministic = True
+class Modules:
+    class SelfAttention(torch.nn.Module):
+        def __init__(self, emb, heads):
+            super().__init__()
+            assert emb % heads == 0
+            self.emb, self.heads = emb, heads
+            self.to_queries = torch.nn.Linear(emb, emb)
+            self.to_keys = torch.nn.Linear(emb, emb)
+            self.to_values = torch.nn.Linear(emb, emb)
+            self.unify = torch.nn.Linear(emb, emb)
+
+        def forward(self, x):
+            b, t, emb = x.shape
+            h = self.heads
+            queries = self.to_queries(x)
+            keys = self.to_keys(x)
+            values = self.to_values(x)
+            queries = queries.view(b, t, h, emb//h)
+            keys = keys.view(b, t, h, emb//h)
+            values = values.view(b, t, h, emb//h)
+            queries = queries.transpose(1, 2).reshape(b*h, t, emb//h)
+            keys = keys.transpose(1, 2).reshape(b*h, t, emb//h)
+            values = values.transpose(1, 2).reshape(b*h, t, emb//h)
+            W = torch.bmm(queries, keys.transpose(1,2))
+            W = W / (emb**(1/2))
+            W = F.softmax(W, dim=2)
+            y = torch.bmm(W, values).view(b, h, t, emb//h)
+            y = y.transpose(1, 2).reshape(b, t, emb)
+            return self.unify(y), W
+
+    class TransformerBlock(torch.nn.Module):
+        def __init__(self, config: Config):
+            super().__init__()
+            self.attention = Modules.SelfAttention(config.emb, config.heads)
+            self.norm1 = torch.nn.LayerNorm(config.emb)
+            self.norm2 = torch.nn.LayerNorm(config.emb)
+            self.fcn = torch.nn.Sequential(
+                torch.nn.Linear(config.emb, 4*config.emb),
+                torch.nn.ReLU(),
+                torch.nn.Linear(4*config.emb, config.emb)
+            )
+
+        def forward(self, x):
+            attented, W = self.attention(x)
+            x = self.norm1(attented + x)
+            ff = self.fcn(x)
+            return self.norm2(ff + x), W
+
+    class Transformer(torch.nn.Module):
+        def __init__(self, config: Config, vocab_size: int):
+            super().__init__()
+            self.config = config
+            self.token_embedding = torch.nn.Embedding(embedding_dim=self.config.emb, num_embeddings=vocab_size)
+            self.pos_embedding = torch.nn.Embedding(embedding_dim=self.config.emb, num_embeddings=self.config.max_length)
+            self.tblock = Modules.TransformerBlock(config=self.config)
+            self.toprobs = torch.nn.Linear(self.config.emb, 2)
+
+        def forward(self, x):
+            tokens = self.token_embedding(x)
+            b, t, e = tokens.shape
+            positions = self.pos_embedding(torch.arange(t, device=self.config.device))[None, :, :].expand(b, t, e)
+            x = tokens + positions
+            x, W = self.tblock(x)
+            x = torch.mean(x, dim=1)
+            x = self.toprobs(x)
+            return F.log_softmax(x, dim=1), W
 
 class DataHandler:
     def __init__(self, config: Config):
@@ -60,22 +136,16 @@ class DataHandler:
         return {"id": id}
 
     def tokenize_all(self):
-        # for dataset in self.datasets:
-        #     self.dataset[dataset] = self.dataset[dataset].map(self.tokenize)
         self.train_dataset = self.train_dataset.map(self.tokenize)
         self.validation_dataset = self.validation_dataset.map(self.tokenize)
         self.test_dataset = self.test_dataset.map(self.tokenize)
 
     def numericalize_all(self):
-        # for dataset in self.datasets:
-        #     self.dataset[dataset] = self.dataset[dataset].map(self.numericalize)
         self.train_dataset = self.train_dataset.map(self.numericalize)
         self.validation_dataset = self.validation_dataset.map(self.numericalize)
         self.test_dataset = self.test_dataset.map(self.numericalize)
 
     def format_all(self):
-        # for dataset in self.datasets:
-        #     self.dataset[dataset] = self.dataset[dataset].with_format(type="torch", columns=["id", "label"])
         self.train_dataset = self.train_dataset.with_format(type="torch", columns=["id", "label"])
         self.validation_dataset = self.validation_dataset.with_format(type="torch", columns=["id", "label"])
         self.test_dataset = self.test_dataset.with_format(type="torch", columns=["id", "label"])
@@ -117,6 +187,50 @@ class DataHandler:
         self.validation_data_loader = DataHandler.get_data_loader(self.validation_dataset, self.config.batch_size, pad_index)
         self.test_data_loader = DataHandler.get_data_loader(self.test_dataset, self.config.batch_size, pad_index)
 
+
+
+class TrainHandler:
+    def __init__(self, config: Config):
+        self.config = config
+        np.random.seed(self.config.seed)
+        torch.manual_seed(self.config.seed)
+        torch.cuda.manual_seed(self.config.seed)
+        torch.backends.cudnn.deterministic = True
+
+    def load(self, data_handler: DataHandler):
+        self.data_handler = data_handler
+        self.model = Modules.Transformer(config=self.config, vocab_size=len(self.data_handler.vocab)).to(self.config.device)
+        self.opt = torch.optim.Adam(lr=self.config.lr, params=self.model.parameters())
+
+    def train(self):
+        self.accs = []
+        for epoch in range(self.config.num_epochs):
+            for batch in self.data_handler.train_data_loader:
+                self.opt.zero_grad()
+                input = batch["id"].to(self.config.device)
+                output = batch["label"].to(self.config.device)
+                preds, _ = self.model(input)
+                loss = F.nll_loss(preds, output)
+                loss.backward()
+                self.opt.step()
+                with torch.no_grad():
+                    tot, cor= 0.0, 0.0
+                    for batch in self.data_handler.validation_data_loader:
+                        input = batch["id"].to(self.config.device)
+                        output = batch["label"].to(self.config.device)
+                        if input.shape[1] > self.config.max_length:
+                            input = input[:, :self.config.max_length]
+                        preds, _ = self.model(input)
+                        preds = preds.argmax(dim=1)
+                        tot += float(input.size(0))
+                        cor += float((output == preds).sum().item())
+                    acc = cor / tot
+                    self.accs.append(acc)
+            print("Epoch:{}; Loss: {}; Validation Accuracy: {}".format(epoch, loss.item(), acc))
+
+    def save(self):
+        torch.save(self.model.state_dict(), "trained_models/clasify_{}heads.pt".format(self.config.heads))
+        np.save("trained_models/acc.npy", self.accs)
 
 def elapsed_from_start(start_time, label=""):
     elapsed_time = time.time() - start_time

@@ -1,3 +1,4 @@
 # My Transformer Implementation
 
-* [Jupyter Notebook](transformer.ipynb)
+* [Working Notebook](transformer_all.ipynb)
+* [Example Jupyter Notebook](transformer.ipynb)

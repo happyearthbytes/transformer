@@ -11,19 +11,21 @@ import torchtext
 from pprint import pprint
 import time
 from functools import partial
+from dataclasses import dataclass, field
 
+@dataclass
 class Config:
-    seed=0 # use fixed seed for testing
-    preview = slice(None,10,None) # first 10 items
-    example_item = 1337
-    max_length = 512 # trim sequences
-    min_freq = 5 # filter uncommon tokens
-    default_token = "<unk>"
-    special_tokens = [default_token, "<pad>"]
-    batch_size = 512
-    lr = 0.001
-    num_epochs = 20
-    heads = 4
+    seed: int = 0 # use fixed seed for testing
+    preview: slice = field(default_factory=lambda : slice(None,10,None))  # first N items
+    example_item: int = 1337
+    max_length: int = 512 # trim sequences
+    min_freq: int = 5 # filter uncommon tokens
+    default_token: str = "<unk>"
+    special_tokens: list[str] = field(default_factory=lambda : ["<unk>", "<pad>"])
+    batch_size: int = 512
+    lr: float = 0.001
+    num_epochs: int = 20
+    heads: int = 4
 
 class TrainHandler:
     @staticmethod
@@ -38,7 +40,6 @@ class DataHandler:
     def __init__(self, config: Config):
         self.config = config
         self.dataset = datasets.load_dataset("zapsdcn/imdb", cache_dir="../data/classification/")
-        self.datasets = ("train","validation","test")
         self.train_dataset = self.dataset['train'] 
         self.validation_dataset = self.dataset['validation']
         self.test_dataset = self.dataset['test']
@@ -48,6 +49,7 @@ class DataHandler:
         self.set_vocab()
         self.numericalize_all()
         self.format_all()
+        self.set_data_loaders()
 
     def tokenize(self, data):
         tokens = self.tokenizer(data["text"])[self.trim]
@@ -85,6 +87,36 @@ class DataHandler:
             specials=self.config.special_tokens,
         )
         self.vocab.set_default_index(self.vocab[self.config.default_token])
+
+    @staticmethod
+    def get_data_loader(dataset, batch_size, pad_index, shuffle=False):
+        def get_collate_fn(pad_index):
+            def collate_fn(batch):
+                batch_ids = [i["id"] for i in batch]
+                batch_ids = torch.nn.utils.rnn.pad_sequence(
+                    batch_ids, padding_value=pad_index, batch_first=True
+                )
+                batch_label = [i["label"] for i in batch]
+                batch_label = torch.stack(batch_label)
+                batch = {"id": batch_ids, "label": batch_label}
+                return batch
+            return collate_fn
+
+        collate_fn = get_collate_fn(pad_index)
+        data_loader = torch.utils.data.DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            collate_fn=collate_fn,
+            shuffle=shuffle,
+        )
+        return data_loader
+
+    def set_data_loaders(self):
+        pad_index = self.vocab["<pad>"]
+        self.train_data_loader = DataHandler.get_data_loader(self.train_dataset, self.config.batch_size, pad_index, shuffle=True)
+        self.validation_data_loader = DataHandler.get_data_loader(self.validation_dataset, self.config.batch_size, pad_index)
+        self.test_data_loader = DataHandler.get_data_loader(self.test_dataset, self.config.batch_size, pad_index)
+
 
 def elapsed_from_start(start_time, label=""):
     elapsed_time = time.time() - start_time

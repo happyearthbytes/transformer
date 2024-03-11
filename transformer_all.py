@@ -113,7 +113,7 @@ class Modules:
         def forward(self, x):
             tokens = self.token_embedding(x)
             b, t, e = tokens.shape
-            positions = self.pos_embedding(torch.arange(t, device=self.config.device))[None, :, :].expand(b, t, e)
+            positions = self.pos_embedding(torch.arange(t, device="cuda"))[None, :, :].expand(b, t, e)
             x = tokens + positions
             x, W = self.tblock(x)
             x = torch.mean(x, dim=1)
@@ -216,7 +216,7 @@ class TrainHandler:
     def load(self, data_handler: DataHandler):
         self.config.elapsed("TrainHandler start")
         self.data_handler = data_handler
-        self.model = Modules.Transformer(config=self.config, vocab_size=len(self.data_handler.vocab)).to(self.config.device)
+        self.model = Modules.Transformer(config=self.config, vocab_size=len(self.data_handler.vocab)).to("cuda")
         self.opt = torch.optim.Adam(lr=self.config.lr, params=self.model.parameters())
         self.config.elapsed("TrainHandler load")
 
@@ -225,35 +225,31 @@ class TrainHandler:
         self.accs = []
         for epoch in range(self.config.num_epochs):
             for batch in self.data_handler.train_data_loader:
-                self.config.elapsed(f"train batch start")
+                # self.config.elapsed(f"train batch start")
                 self.opt.zero_grad()
-                input = batch["id"].to(self.config.device)
-                output = batch["label"].to(self.config.device)
-                self.config.elapsed("train batch ready")
+                input = batch["id"].to("cuda")
+                output = batch["label"].to("cuda")
                 preds, _ = self.model(input)
-                self.config.elapsed("train batch pred")
+                # self.config.elapsed("train batch pred")
                 loss = F.nll_loss(preds, output)
                 loss.backward()
                 self.opt.step()
-                self.config.elapsed("train batch step")
+                # self.config.elapsed("train batch step")
                 with torch.no_grad():
                     tot, cor= 0.0, 0.0
                     for batch in self.data_handler.validation_data_loader:
-                        self.config.elapsed("train validate start")
-                        input = batch["id"].to(self.config.device)
-                        output = batch["label"].to(self.config.device)
+                        input = batch["id"].to("cuda")
+                        output = batch["label"].to("cuda")
                         if input.shape[1] > self.config.max_length:
                             input = input[:, :self.config.max_length]
-                        self.config.elapsed("train validate ready")
                         preds, _ = self.model(input)
-                        self.config.elapsed("train validate pred")
+                        # self.config.elapsed("train validate pred")
                         preds = preds.argmax(dim=1)
                         tot += float(input.size(0))
                         cor += float((output == preds).sum().item())
-                        self.config.elapsed("train validate done")
+                        # self.config.elapsed("train validate done")
                     acc = cor / tot
                     self.accs.append(acc)
-                self.config.elapsed("train batch done")
             print("Epoch:{}; Loss: {}; Validation Accuracy: {}".format(epoch, loss.item(), acc))
 
     def save(self):

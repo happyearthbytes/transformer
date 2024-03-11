@@ -44,6 +44,14 @@ class Config:
     heads: int = 4
     emb: int = 32
     device: str = "cuda"
+    start_time: float = field(default_factory=lambda : time.time())
+    last_time: float = 0.0
+
+    def elapsed(self, label=""):
+        elapsed_time = time.time() - self.start_time
+        delta_time = elapsed_time - self.last_time if self.last_time > 0.0 else 0.0
+        print(f"{elapsed_time:10.6f}s {delta_time:10.6f}s |\t{label}")
+        self.last_time = elapsed_time
 
 class Modules:
     class SelfAttention(torch.nn.Module):
@@ -115,17 +123,25 @@ class Modules:
 class DataHandler:
     def __init__(self, config: Config):
         self.config = config
+        self.config.elapsed("DataHandler Start")
         self.dataset = datasets.load_dataset("zapsdcn/imdb", cache_dir="../data/classification/")
+        self.config.elapsed("DataHandler load_dataset")
         self.train_dataset = self.dataset['train'] 
         self.validation_dataset = self.dataset['validation']
         self.test_dataset = self.dataset['test']
         self.tokenizer = torchtext.data.utils.get_tokenizer("basic_english")
+        self.config.elapsed("DataHandler get_tokenizer")
         self.trim = slice(None,config.max_length,None)
         self.tokenize_all()
+        self.config.elapsed("DataHandler tokenize_all")
         self.set_vocab()
+        self.config.elapsed("DataHandler set_vocab")
         self.numericalize_all()
+        self.config.elapsed("DataHandler numericalize_all")
         self.format_all()
+        self.config.elapsed("DataHandler format_all")
         self.set_data_loaders()
+        self.config.elapsed("DataHandler set_data_loaders")
 
     def tokenize(self, data):
         tokens = self.tokenizer(data["text"])[self.trim]
@@ -198,55 +214,60 @@ class TrainHandler:
         torch.backends.cudnn.deterministic = True
 
     def load(self, data_handler: DataHandler):
+        self.config.elapsed("TrainHandler start")
         self.data_handler = data_handler
         self.model = Modules.Transformer(config=self.config, vocab_size=len(self.data_handler.vocab)).to(self.config.device)
         self.opt = torch.optim.Adam(lr=self.config.lr, params=self.model.parameters())
+        self.config.elapsed("TrainHandler load")
 
     def train(self):
+        self.config.elapsed("train start")
         self.accs = []
         for epoch in range(self.config.num_epochs):
             for batch in self.data_handler.train_data_loader:
+                self.config.elapsed(f"train batch start")
                 self.opt.zero_grad()
                 input = batch["id"].to(self.config.device)
                 output = batch["label"].to(self.config.device)
+                self.config.elapsed("train batch ready")
                 preds, _ = self.model(input)
+                self.config.elapsed("train batch pred")
                 loss = F.nll_loss(preds, output)
                 loss.backward()
                 self.opt.step()
+                self.config.elapsed("train batch step")
                 with torch.no_grad():
                     tot, cor= 0.0, 0.0
                     for batch in self.data_handler.validation_data_loader:
+                        self.config.elapsed("train validate start")
                         input = batch["id"].to(self.config.device)
                         output = batch["label"].to(self.config.device)
                         if input.shape[1] > self.config.max_length:
                             input = input[:, :self.config.max_length]
+                        self.config.elapsed("train validate ready")
                         preds, _ = self.model(input)
+                        self.config.elapsed("train validate pred")
                         preds = preds.argmax(dim=1)
                         tot += float(input.size(0))
                         cor += float((output == preds).sum().item())
+                        self.config.elapsed("train validate done")
                     acc = cor / tot
                     self.accs.append(acc)
+                self.config.elapsed("train batch done")
             print("Epoch:{}; Loss: {}; Validation Accuracy: {}".format(epoch, loss.item(), acc))
 
     def save(self):
         torch.save(self.model.state_dict(), "trained_models/clasify_{}heads.pt".format(self.config.heads))
         np.save("trained_models/acc.npy", self.accs)
-
-def elapsed_from_start(start_time, label=""):
-    elapsed_time = time.time() - start_time
-    print(f"{elapsed_time:10.6f}s |\t{label}")
+        self.config.elapsed("save")
 
 def main():
-    start_time = time.time()
-    elapsed = partial(elapsed_from_start,start_time)
     config=Config()
-    TrainHandler.config(config=config)
-    elapsed("Config")
-    dh = DataHandler(config=config)
-    elapsed("DataHandler")
-    end_time = time.time()
-    elapsed("End")
-
+    train_handler = TrainHandler(config=config)
+    data_handler = DataHandler(config=config)
+    train_handler.load(data_handler=data_handler)
+    train_handler.train()
+    train_handler.save()
 
 if __name__ == "__main__":
     main()

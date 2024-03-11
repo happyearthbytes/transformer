@@ -224,6 +224,29 @@ class TrainHandler:
         self.config.elapsed("train start")
         self.accs = []
         for epoch in range(self.config.num_epochs):
+            for i, batch in enumerate(self.data_handler.train_data_loader):
+                self.opt.zero_grad()
+                loss = F.nll_loss(self.model(batch["id"].to("cuda"))[0], batch["label"].to("cuda"))
+                loss.backward()
+                self.opt.step()
+            with torch.no_grad():
+                tot, cor= 0.0, 0.0
+                for batch in self.data_handler.validation_data_loader:
+                    input = batch["id"].to("cuda")
+                    if input.shape[1] > self.config.max_length:
+                        input = input[:, :self.config.max_length]
+                    preds, _ = self.model(input)
+                    preds = preds.argmax(dim=1)
+                    tot += float(input.size(0))
+                    cor += float((batch["label"].to("cuda") == preds).sum().item())
+                acc = cor / tot
+                self.accs.append(acc)
+            print("Epoch:{}; Loss: {}; Validation Accuracy: {}".format(epoch, loss.item(), acc))
+
+    def train_orig(self):
+        self.config.elapsed("train start")
+        self.accs = []
+        for epoch in range(self.config.num_epochs):
             for batch in self.data_handler.train_data_loader:
                 # self.config.elapsed(f"train batch start")
                 self.opt.zero_grad()
